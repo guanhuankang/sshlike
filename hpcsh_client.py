@@ -27,6 +27,7 @@ from protocol import (
     make_session_id,
     now_ms,
     read_ndjson_incremental,
+    shared_root_from_env,
 )
 
 
@@ -145,9 +146,8 @@ def run_interactive(session_dir: Path) -> int:
     return exit_code
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Shared-disk offline HPC terminal client")
-    parser.add_argument("--root", required=True, help="Shared root directory, e.g. /share/hpc_remote")
     parser.add_argument("--node", required=True, help="Node name, e.g. node01")
     parser.add_argument("--session", help="Reuse specific session id")
     parser.add_argument(
@@ -155,16 +155,27 @@ def parse_args():
         action="store_true",
         help="Keep session directory on exit for debugging/reconnect",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main():
-    args = parse_args()
-    root = Path(args.root).expanduser().resolve()
+def main(argv=None):
+    args = parse_args(argv)
+    root = shared_root_from_env()
     node_dir = root / args.node
     node_dir.mkdir(parents=True, exist_ok=True)
 
-    session_id = args.session or make_session_id(getpass.getuser())
+    if args.session:
+        session_id = args.session
+    else:
+        session_id = None
+        for _ in range(64):
+            sid = make_session_id()
+            if not (node_dir / f"session_{sid}").exists():
+                session_id = sid
+                break
+        if session_id is None:
+            print("[hpcsh-client] could not allocate a free session id", file=sys.stderr)
+            sys.exit(1)
     session_dir = node_dir / f"session_{session_id}"
     cleanup = not args.no_cleanup
 

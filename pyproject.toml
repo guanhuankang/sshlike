@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hpcsh"
+version = "0.1.0"
+description = "Shared-disk offline HPC terminal over NFS/Lustre"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+hpcsh = "hpcsh_cli:main"
+
+[tool.setuptools]
+py-modules = ["protocol", "hpcsh_cli", "hpcsh_client", "hpcsh_server"]

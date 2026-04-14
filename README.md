@@ -1,81 +1,107 @@
-# hpcsh (shared-disk offline HPC terminal)
+# hpcsh（共享盘离线 HPC 终端）
 
-通过共享磁盘目录实现类 SSH 交互终端：
+通过共享磁盘上的目录与文件，在**无网络互通**的登录节点与计算节点之间实现类 SSH 的交互终端：
 
-- 登录节点运行客户端，发送键盘输入到会话目录
-- 计算节点运行服务端，使用 PTY 执行 shell 并回传输出
-- 全程无网络互通，仅依赖共享存储（NFS/Lustre 等）
+- 登录节点跑客户端，把键盘输入写入会话目录
+- 计算节点跑服务端，用 PTY 起 shell 并把输出写回
+- 仅依赖 NFS / Lustre 等共享存储
+
+## 命令一览
+
+均需先设置环境变量 **`HPCSH_ROOT`**（共享根目录的绝对路径）。
+
+| 命令 | 说明 |
+|------|------|
+| `hpcsh ls` | 列出 `$HPCSH_ROOT` 下各**节点目录**名（一般与计算节点名一致） |
+| `hpcsh sessions <node>` | 列出该节点下已有**会话**，表头为 SESSION_ID / STATE / USER / CREATED，便于复制 id 重连 |
+| `hpcsh server --node <node>` | 在**计算节点**上常驻监听，处理 `session_*` 目录（需 Linux，`pty`） |
+| `hpcsh login <node>` | 在**登录节点**上连接该节点，进入交互 shell |
+
+查看帮助：`hpcsh -h`，各子命令：`hpcsh login -h` 等。
+
+## 环境与安装
+
+- Python **3.9+**
+- **`HPCSH_ROOT`**：双方指向同一共享路径，例如 `export HPCSH_ROOT=/share/hpc_remote`
+
+**推荐：pip 安装（会安装 `hpcsh` 到当前环境的 scripts 目录）**
+
+```bash
+cd /path/to/sshlike
+pip install .
+# 本地开发可写：pip install -e .
+hpcsh -h
+```
+
+若终端提示找不到 `hpcsh`，把 pip 的 bin 目录加入 `PATH`（例如 `python3 -m site --user-base` 下的 `bin`），或使用下面的直接调用方式。
+
+**不安装包时**，在项目目录中可直接调用 CLI 模块：
+
+```bash
+export HPCSH_ROOT=/share/hpc_remote
+python3 hpcsh_cli.py -h
+python3 hpcsh_cli.py ls
+python3 hpcsh_cli.py login node01
+```
+
+（也可直接运行 `hpcsh_client.py` / `hpcsh_server.py` 并传 `--node`，同样依赖已设置的 `HPCSH_ROOT`。）
+
+## 典型使用流程
+
+**1. 计算节点**启动服务端（每个需跑 shell 的节点各启一个，`<node>` 与目录名一致）：
+
+```bash
+export HPCSH_ROOT=/share/hpc_remote
+hpcsh server --node node01
+```
+
+服务端监听：`$HPCSH_ROOT/node01/session_*`。
+
+**2. 登录节点**连接并操作：
+
+```bash
+export HPCSH_ROOT=/share/hpc_remote
+hpcsh login node01
+```
+
+**3. 查看节点与会话（重连）**
+
+```bash
+hpcsh ls
+hpcsh sessions node01
+hpcsh login node01 --session <SESSION_ID>
+```
+
+新建会话时，id 为 **8 位小写字母与数字**；旧目录若仍是长 id，也可照常用于 `--session`。
+
+进入远端 shell 后可运行 `hostname`、`nvidia-smi`、`top` 等；输入 `exit` 退出远端 shell。
+
+## `login` 可选参数
+
+| 参数 | 含义 |
+|------|------|
+| `--session <id>` | 接入已有会话（id 见 `hpcsh sessions <node>`） |
+| `--no-cleanup` | 客户端退出时不删除会话目录，便于排障或再次 `--session` 重连 |
 
 ## 目录协议
 
-共享根目录示例：`/share/hpc_remote`
+共享根示例：`/share/hpc_remote`
 
-节点目录：`/share/hpc_remote/node01/`
-
-会话目录：`/share/hpc_remote/node01/session_<sid>/`
+- 节点目录：`/share/hpc_remote/node01/`
+- 会话目录：`/share/hpc_remote/node01/session_<id>/`（`<id>` 为新会话时的 8 位短 id，或与历史数据一致的长 id）
 
 会话目录内文件：
 
-- `meta.json`：会话元信息
+- `meta.json`：会话元信息（用户、创建时间等）
 - `state.json`：状态与心跳
-- `in.log`：客户端输入事件（stdin/resize/signal/heartbeat）
-- `out.log`：服务端输出事件（stdout/exit）
+- `in.log`：客户端事件（stdin / resize / signal / heartbeat）
+- `out.log`：服务端输出（stdout / stderr / exit）
 - `event.log`：诊断事件
 - `lock`：服务端会话锁
-- `pid`：远端 shell pid
-
-## 使用方式
-
-> 需要 Python 3.9+，服务端应运行在 Linux 计算节点（依赖 `pty`）。
-
-### 0) 入口命令
-
-在项目目录内可直接使用统一入口：
-
-- `./hpcsh`
-
-可选：加入 PATH，直接像 `ssh` 一样调用：
-
-```bash
-chmod +x hpcsh hpcsh_client.py hpcsh_server.py
-sudo ln -sf "$(pwd)/hpcsh" /usr/local/bin/hpcsh
-```
-
-### 1) 在计算节点启动服务端
-
-```bash
-./hpcsh server node01 --root /share/hpc_remote
-```
-
-服务端会持续监听：`/share/hpc_remote/node01/session_*`
-
-### 2) 在登录节点启动客户端
-
-```bash
-./hpcsh node01 --root /share/hpc_remote
-```
-
-进入交互后可直接运行命令，例如：
-
-- `hostname`
-- `nvidia-smi`
-- `top`
-
-输入 `exit` 退出远端 shell。
-
-## 可选参数
-
-客户端：
-
-- `--session <sid>`：复用既有会话
-- `--no-cleanup`：退出时不删除会话目录（便于排障/重连）
-
-服务端：
-
-- `hpcsh server <node> --root <dir>`
+- `pid`：远端 shell 进程号
 
 ## 设计要点
 
-- 通信协议采用 append-only NDJSON，轮询读取增量偏移
-- 使用 PTY 保证交互程序兼容（`top/vim` 等）
-- 多会话通过 `session_<sid>` 隔离，服务端通过 `lock` 防重入
+- 通信为 append-only NDJSON，客户端与服务端轮询增量偏移
+- PTY 保证 `top` / `vim` 等交互程序可用
+- 多会话以 `session_<id>` 隔离；服务端用 `lock` 避免同一会话重复 attach

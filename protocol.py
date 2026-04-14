@@ -2,8 +2,8 @@ import base64
 import json
 import os
 import random
-import socket
 import string
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -38,10 +38,9 @@ def random_suffix(length: int = 8) -> str:
     return "".join(random.choice(chars) for _ in range(length))
 
 
-def make_session_id(user: str) -> str:
-    host = socket.gethostname().replace(".", "_")
-    pid = os.getpid()
-    return f"{user}_{host}_{pid}_{now_ms()}_{random_suffix()}"
+def make_session_id() -> str:
+    """Short unique id for directory name session_<id> (8 lowercase alphanumeric chars)."""
+    return random_suffix(8)
 
 
 def atomic_write_json(path: Path, payload: Dict) -> None:
@@ -113,3 +112,14 @@ def list_session_dirs(node_dir: Path) -> Iterable[Path]:
     if not node_dir.exists():
         return []
     return sorted([p for p in node_dir.iterdir() if p.is_dir() and p.name.startswith("session_")])
+
+
+def shared_root_from_env() -> Path:
+    raw = (os.environ.get("HPCSH_ROOT") or "").strip()
+    if not raw:
+        print(
+            "hpcsh: HPCSH_ROOT is not set. Example: export HPCSH_ROOT=/share/hpc_remote",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return Path(raw).expanduser().resolve()

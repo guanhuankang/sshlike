@@ -32,6 +32,7 @@ from protocol import (
     now_ms,
     read_json,
     read_ndjson_incremental,
+    shared_root_from_env,
 )
 
 
@@ -248,16 +249,15 @@ def serve(node_dir: Path) -> None:
         time.sleep(0.2)
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Shared-disk offline HPC terminal server")
-    parser.add_argument("--root", required=True, help="Shared root directory, e.g. /share/hpc_remote")
     parser.add_argument("--node", required=True, help="Node name, e.g. node01")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main():
-    args = parse_args()
-    node_dir = Path(args.root).expanduser().resolve() / args.node
+def main(argv=None):
+    args = parse_args(argv)
+    node_dir = shared_root_from_env() / args.node
     serve(node_dir)
 
 
