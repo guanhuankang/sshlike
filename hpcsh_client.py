@@ -13,6 +13,7 @@ import time
 import tty
 import unicodedata
 from pathlib import Path
+from typing import Optional
 
 from protocol import (
     CLIENT_POLL_INTERVAL,
@@ -285,14 +286,9 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    root = shared_root_from_env()
-    node_dir = root / args.node
-    node_dir.mkdir(parents=True, exist_ok=True)
-
-    if args.session:
-        session_id = args.session
+def _allocate_or_reuse_session(node_dir: Path, node: str, cleanup: bool, session: Optional[str]) -> Path:
+    if session:
+        session_id = session
     else:
         session_id = None
         for _ in range(64):
@@ -303,14 +299,99 @@ def main(argv=None):
         if session_id is None:
             print("[hpcsh-client] could not allocate a free session id", file=sys.stderr)
             sys.exit(1)
-    session_dir = node_dir / f"session_{session_id}"
-    cleanup = not args.no_cleanup
 
+    session_dir = node_dir / f"session_{session_id}"
     if not session_dir.exists():
-        create_session(session_dir, args.node, cleanup=cleanup)
+        create_session(session_dir, node, cleanup=cleanup)
         print(f"[hpcsh-client] created session: {session_dir.name}")
     else:
         print(f"[hpcsh-client] reusing session: {session_dir.name}")
+    return session_dir
+
+
+def run_script(session_dir: Path, script_text: str) -> int:
+    in_seq = 0
+    out_offset = 0
+    last_heartbeat = time.time()
+    exit_code: Optional[int] = None
+
+    rows, cols = get_tty_size()
+    in_seq += 1
+    append_input(session_dir, in_seq, "resize", rows=rows, cols=cols)
+
+    payload = script_text
+    if not payload.endswith("\n"):
+        payload += "\n"
+    payload += "exit\n"
+    in_seq += 1
+    append_input(session_dir, in_seq, "stdin", data_b64=b64_encode(payload.encode("utf-8")))
+
+    while exit_code is None:
+        events, out_offset = read_ndjson_incremental(session_dir / OUT_LOG_FILE, out_offset)
+        for evt in events:
+            evt_type = evt.get("type")
+            if evt_type in ("stdout", "stderr"):
+                data_b64 = evt.get("data_b64", "")
+                if data_b64:
+                    os.write(sys.stdout.fileno(), b64_decode(data_b64))
+            elif evt_type == "exit":
+                exit_code = int(evt.get("code", 0))
+                break
+
+        now = time.time()
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+            in_seq += 1
+            append_input(session_dir, in_seq, "heartbeat")
+            last_heartbeat = now
+
+        if exit_code is None:
+            time.sleep(CLIENT_POLL_INTERVAL)
+    return exit_code
+
+
+def exec_script(node: str, script_path: str, no_cleanup: bool = False, session: Optional[str] = None) -> int:
+    root = shared_root_from_env()
+    node_dir = root / node
+    node_dir.mkdir(parents=True, exist_ok=True)
+    cleanup = not no_cleanup
+    session_dir = _allocate_or_reuse_session(node_dir, node, cleanup=cleanup, session=session)
+
+    script_file = Path(script_path)
+    if not script_file.is_file():
+        print(f"[hpcsh-client] script file not found: {script_file}", file=sys.stderr)
+        return 2
+    script_text = script_file.read_text(encoding="utf-8")
+
+    print(f"[hpcsh-client] executing script on node {node}: {script_file}")
+    sys.stdout.flush()
+    code = 0
+    try:
+        code = run_script(session_dir, script_text)
+    except KeyboardInterrupt:
+        code = 130
+    finally:
+        append_ndjson(
+            session_dir / EVENT_LOG_FILE,
+            {"ts_ms": now_ms(), "level": "info", "message": "client closed", "client_pid": os.getpid()},
+        )
+        append_ndjson(session_dir / IN_LOG_FILE, {"seq": 999999999, "ts_ms": now_ms(), "type": "close"})
+        if cleanup:
+            time.sleep(0.2)
+            try:
+                shutil.rmtree(session_dir)
+                print(f"[hpcsh-client] cleaned: {session_dir}")
+            except OSError:
+                print(f"[hpcsh-client] cleanup skipped: {session_dir}", file=sys.stderr)
+    return code
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    root = shared_root_from_env()
+    node_dir = root / args.node
+    node_dir.mkdir(parents=True, exist_ok=True)
+    cleanup = not args.no_cleanup
+    session_dir = _allocate_or_reuse_session(node_dir, args.node, cleanup=cleanup, session=args.session)
 
     print("[hpcsh-client] connected. type `exit` to quit remote shell.")
     sys.stdout.flush()

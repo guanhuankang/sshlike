@@ -16,6 +16,7 @@
 | `hpcsh sessions <node>` | 列出该节点下已有**会话**，表头为 SESSION_ID / STATE / USER / CREATED，便于复制 id 重连 |
 | `hpcsh server --node <node>` | 在**计算节点**上常驻监听，处理 `session_*` 目录（需 Linux，`pty`） |
 | `hpcsh login <node>` | 在**登录节点**上连接该节点，进入交互 shell |
+| `hpcsh exec <script> --node <node>` | 在**登录节点**上连接该节点，执行本地脚本后自动退出 |
 
 查看帮助：`hpcsh -h`，各子命令：`hpcsh login -h` 等。
 
@@ -70,6 +71,7 @@ cd /share/hpc_remote   # 与 login/server 一致
 hpcsh ls
 hpcsh sessions node01
 hpcsh login node01 --session <SESSION_ID>
+hpcsh exec ./job.sh --node node01
 ```
 
 新建会话时，id 为 **8 位小写字母与数字**；旧目录若仍是长 id，也可照常用于 `--session`。
@@ -82,6 +84,16 @@ hpcsh login node01 --session <SESSION_ID>
 |------|------|
 | `--session <id>` | 接入已有会话（id 见 `hpcsh sessions <node>`） |
 | `--no-cleanup` | 客户端退出时不删除会话目录，便于排障或再次 `--session` 重连 |
+
+## `exec` 用法
+
+```bash
+hpcsh exec ./script.sh --node node01
+```
+
+- `script` 是登录节点上的本地脚本文件路径（按 UTF-8 读取）。
+- 会自动把脚本内容发送到远端 shell 执行，并追加 `exit` 在脚本结束后退出会话。
+- 可选参数与 `login` 一致：`--session <id>`、`--no-cleanup`。
 
 ## 目录协议
 

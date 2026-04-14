@@ -110,6 +110,23 @@ def main() -> None:
         help="Keep session directory on exit for debugging/reconnect",
     )
 
+    p_exec = sub.add_parser(
+        "exec",
+        help="Execute a local script on a node and exit",
+    )
+    p_exec.add_argument("script", help="Local script file path to execute remotely")
+    p_exec.add_argument("--node", required=True, help="Node name, e.g. node01")
+    p_exec.add_argument(
+        "--session",
+        metavar="ID",
+        help="Reuse session id (see: hpcsh sessions NODE)",
+    )
+    p_exec.add_argument(
+        "--no-cleanup",
+        action="store_true",
+        help="Keep session directory on exit for debugging/reconnect",
+    )
+
     args = parser.parse_args()
 
     if args.command == "ls":
@@ -139,6 +156,17 @@ def main() -> None:
             login_argv += ["--no-cleanup"]
         hpcsh_client.main(login_argv)
         return
+
+    if args.command == "exec":
+        import hpcsh_client
+
+        code = hpcsh_client.exec_script(
+            node=args.node,
+            script_path=args.script,
+            no_cleanup=args.no_cleanup,
+            session=args.session,
+        )
+        sys.exit(code)
 
 
 if __name__ == "__main__":
