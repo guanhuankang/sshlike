@@ -3,7 +3,6 @@ import json
 import os
 import random
 import string
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -11,6 +10,11 @@ from typing import Dict, Iterable, List, Tuple
 
 
 PROTOCOL_VERSION = 1
+
+# Latency tuning (shared disk polling). Lower = snappier, slightly more CPU/NFS ops.
+CLIENT_POLL_INTERVAL = 0.008
+SERVER_SESSION_POLL_INTERVAL = 0.008
+SERVER_SCAN_INTERVAL = 0.04
 
 META_FILE = "meta.json"
 STATE_FILE = "state.json"
@@ -69,7 +73,10 @@ def append_ndjson(path: Path, event: Dict) -> None:
     with path.open("a", encoding="utf-8", newline="\n") as f:
         f.write(line)
         f.flush()
-        os.fsync(f.fileno())
+        # Per-line fsync is very slow on NFS; enable with HPCSH_FSYNC=1 if the other side
+        # does not see new lines without a full sync on your storage.
+        if os.environ.get("HPCSH_FSYNC", "").strip().lower() in ("1", "true", "yes"):
+            os.fsync(f.fileno())
 
 
 def read_ndjson_incremental(path: Path, offset: int) -> Tuple[List[Dict], int]:
@@ -115,11 +122,8 @@ def list_session_dirs(node_dir: Path) -> Iterable[Path]:
 
 
 def shared_root_from_env() -> Path:
+    """Shared root: $HPCSH_ROOT if set, else current working directory (login/server must agree)."""
     raw = (os.environ.get("HPCSH_ROOT") or "").strip()
-    if not raw:
-        print(
-            "hpcsh: HPCSH_ROOT is not set. Example: export HPCSH_ROOT=/share/hpc_remote",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    return Path(raw).expanduser().resolve()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path.cwd().resolve()

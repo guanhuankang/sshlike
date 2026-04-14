@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import codecs
 import getpass
 import os
 import select
@@ -10,9 +11,11 @@ import sys
 import termios
 import time
 import tty
+import unicodedata
 from pathlib import Path
 
 from protocol import (
+    CLIENT_POLL_INTERVAL,
     EVENT_LOG_FILE,
     IN_LOG_FILE,
     META_FILE,
@@ -31,8 +34,14 @@ from protocol import (
 )
 
 
-POLL_INTERVAL = 0.05
 HEARTBEAT_INTERVAL = 2.0
+
+
+def _char_display_width(ch: str) -> int:
+    if ord(ch) < 128:
+        return 1
+    ea = unicodedata.east_asian_width(ch)
+    return 2 if ea in ("W", "F") else 1
 
 
 class TerminalMode:
@@ -80,13 +89,27 @@ def append_input(session_dir: Path, seq: int, evt_type: str, **kwargs):
     append_ndjson(session_dir / IN_LOG_FILE, payload)
 
 
+def _esc_seq_complete(seq: bytes) -> bool:
+    if not seq or seq[0] != 0x1B:
+        return True
+    if len(seq) == 1:
+        return False
+    if seq[1] == ord("["):
+        # CSI ends with a byte in 0x40–0x7e (not '[' itself).
+        return len(seq) >= 3 and 0x40 <= seq[-1] <= 0x7E and seq[-1] != ord("[")
+    if seq[1] == ord("O"):
+        return len(seq) >= 3
+    return len(seq) >= 2
+
+
 def run_interactive(session_dir: Path) -> int:
     in_seq = 0
     out_offset = 0
     running = True
     saw_exit = False
     exit_code = 0
-    last_heartbeat = 0.0
+    # Avoid sending heartbeat on the first loop tick (was last_heartbeat=0 → immediate write).
+    last_heartbeat = time.time()
     pending_resize = True
 
     def send_resize():
@@ -102,10 +125,119 @@ def run_interactive(session_dir: Path) -> int:
     old_handler = signal.getsignal(signal.SIGWINCH)
     signal.signal(signal.SIGWINCH, on_winch)
 
+    # Line not yet sent to shared disk: local edit + local echo only (no disk on backspace).
+    line_chars: list[str] = []
+    esc_buf = bytearray()
+    utf8_dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    out_fd = sys.stdout.fileno()
+
+    def disk_stdin(payload: bytes) -> None:
+        nonlocal in_seq
+        if not payload:
+            return
+        in_seq += 1
+        append_input(session_dir, in_seq, "stdin", data_b64=b64_encode(payload))
+
+    def line_bytes() -> bytes:
+        return "".join(line_chars).encode("utf-8")
+
+    def flush_line_with_suffix(suffix: bytes) -> None:
+        nonlocal line_chars
+        payload = line_bytes() + suffix
+        line_chars.clear()
+        disk_stdin(payload)
+
+    def local_echo(ch: str) -> None:
+        os.write(out_fd, ch.encode("utf-8"))
+
+    def backspace_local() -> None:
+        if not line_chars:
+            return
+        ch = line_chars.pop()
+        w = _char_display_width(ch)
+        os.write(out_fd, (("\b \b") * w).encode())
+
+    def handle_u_char(ch: str) -> None:
+        nonlocal esc_buf
+        o = ord(ch)
+
+        if esc_buf:
+            if ch in ("\x08", "\x7f"):
+                if esc_buf:
+                    esc_buf.pop()
+                return
+            if ch in ("\n", "\r", "\t"):
+                flush_line_with_suffix(bytes(esc_buf) + ch.encode("utf-8"))
+                esc_buf.clear()
+                return
+            esc_buf.extend(ch.encode("utf-8"))
+            if len(esc_buf) > 48:
+                flush_line_with_suffix(bytes(esc_buf))
+                esc_buf.clear()
+                return
+            if _esc_seq_complete(bytes(esc_buf)):
+                flush_line_with_suffix(bytes(esc_buf))
+                esc_buf.clear()
+            return
+
+        if ch == "\x1b":
+            esc_buf.extend(b"\x1b")
+            if _esc_seq_complete(bytes(esc_buf)):
+                flush_line_with_suffix(bytes(esc_buf))
+                esc_buf.clear()
+            return
+        if ch in ("\n", "\r"):
+            flush_line_with_suffix(ch.encode("utf-8"))
+            return
+        if ch == "\t":
+            flush_line_with_suffix(b"\t")
+            return
+        if ch in ("\x08", "\x7f"):
+            backspace_local()
+            return
+        if ch in ("\x03", "\x04", "\x1a"):
+            flush_line_with_suffix(ch.encode("utf-8"))
+            return
+        if ch == "\x00":
+            return
+        if o >= 32 or o > 127:
+            line_chars.append(ch)
+            local_echo(ch)
+            return
+        flush_line_with_suffix(ch.encode("utf-8"))
+
+    def process_stdin_chunk(data: bytes) -> None:
+        text = utf8_dec.decode(data, final=False)
+        for ch in text:
+            handle_u_char(ch)
+
     try:
         with TerminalMode() as tm:
+            in_fd = sys.stdin.fileno()
             while running:
                 now = time.time()
+
+                # Pull remote output before client->disk writes (resize/heartbeat). On slow NFS each
+                # append to in.log can block seconds; otherwise the shell prompt appears very late or
+                # feels "stuck" with a blank screen.
+                while running:
+                    events, out_offset = read_ndjson_incremental(session_dir / OUT_LOG_FILE, out_offset)
+                    if not events:
+                        break
+                    for evt in events:
+                        evt_type = evt.get("type")
+                        if evt_type in ("stdout", "stderr"):
+                            data_b64 = evt.get("data_b64", "")
+                            if data_b64:
+                                os.write(sys.stdout.fileno(), b64_decode(data_b64))
+                        elif evt_type == "exit":
+                            exit_code = int(evt.get("code", 0))
+                            saw_exit = True
+                            running = False
+
+                if not running:
+                    break
+
                 if pending_resize:
                     send_resize()
                     pending_resize = False
@@ -114,30 +246,25 @@ def run_interactive(session_dir: Path) -> int:
                     append_input(session_dir, in_seq, "heartbeat")
                     last_heartbeat = now
 
-                events, out_offset = read_ndjson_incremental(session_dir / OUT_LOG_FILE, out_offset)
-                for evt in events:
-                    evt_type = evt.get("type")
-                    if evt_type in ("stdout", "stderr"):
-                        data_b64 = evt.get("data_b64", "")
-                        if data_b64:
-                            os.write(sys.stdout.fileno(), b64_decode(data_b64))
-                    elif evt_type == "exit":
-                        exit_code = int(evt.get("code", 0))
-                        saw_exit = True
-                        running = False
-
-                if not running:
-                    break
-
                 if tm.enabled:
-                    ready, _, _ = select.select([sys.stdin.fileno()], [], [], POLL_INTERVAL)
+                    ready, _, _ = select.select([in_fd], [], [], CLIENT_POLL_INTERVAL)
                     if ready:
-                        data = os.read(sys.stdin.fileno(), 4096)
+                        data = os.read(in_fd, 4096)
                         if data:
-                            in_seq += 1
-                            append_input(session_dir, in_seq, "stdin", data_b64=b64_encode(data))
+                            process_stdin_chunk(data)
                 else:
-                    time.sleep(POLL_INTERVAL)
+                    data = os.read(in_fd, 4096) if select.select([in_fd], [], [], 0)[0] else b""
+                    if not data:
+                        time.sleep(CLIENT_POLL_INTERVAL)
+                    else:
+                        in_seq += 1
+                        append_input(session_dir, in_seq, "stdin", data_b64=b64_encode(data))
+            if line_chars:
+                disk_stdin(line_bytes())
+                line_chars.clear()
+            if esc_buf:
+                flush_line_with_suffix(bytes(esc_buf))
+                esc_buf.clear()
     finally:
         signal.signal(signal.SIGWINCH, old_handler)
 
@@ -186,6 +313,8 @@ def main(argv=None):
         print(f"[hpcsh-client] reusing session: {session_dir.name}")
 
     print("[hpcsh-client] connected. type `exit` to quit remote shell.")
+    sys.stdout.flush()
+    sys.stderr.flush()
     code = 0
     try:
         code = run_interactive(session_dir)

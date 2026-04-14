@@ -75,7 +75,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="hpcsh", description="Shared-disk offline HPC terminal")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("ls", help="List node directories under $HPCSH_ROOT")
+    sub.add_parser("ls", help="List node directories under shared root ($HPCSH_ROOT or cwd)")
 
     p_sess = sub.add_parser(
         "sessions",
@@ -83,10 +83,21 @@ def main() -> None:
     )
     p_sess.add_argument("node", help="Node name, e.g. node01")
 
-    p_server = sub.add_parser("server", help="Run PTY server on a compute node")
+    p_server = sub.add_parser(
+        "server",
+        help="Run PTY server on a compute node (shared root: $HPCSH_ROOT or cwd)",
+    )
     p_server.add_argument("--node", required=True, help="Node name, e.g. node01")
+    p_server.add_argument(
+        "--keep-sessions-on-exit",
+        action="store_true",
+        help="Keep session_* dirs when server stops (default: remove them on exit)",
+    )
 
-    p_login = sub.add_parser("login", help="Connect client to a node (set HPCSH_ROOT on login node)")
+    p_login = sub.add_parser(
+        "login",
+        help="Connect client to a node (shared root: $HPCSH_ROOT or current directory)",
+    )
     p_login.add_argument("node", help="Node name, e.g. node01")
     p_login.add_argument(
         "--session",
@@ -112,7 +123,10 @@ def main() -> None:
     if args.command == "server":
         import hpcsh_server
 
-        hpcsh_server.main(["--node", args.node])
+        server_argv = ["--node", args.node]
+        if args.keep_sessions_on_exit:
+            server_argv.append("--keep-sessions-on-exit")
+        hpcsh_server.main(server_argv)
         return
 
     if args.command == "login":

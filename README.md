@@ -8,11 +8,11 @@
 
 ## 命令一览
 
-均需先设置环境变量 **`HPCSH_ROOT`**（共享根目录的绝对路径）。
+**共享根目录**：若设置了环境变量 **`HPCSH_ROOT`**，则所有命令使用该路径；**未设置时**默认为执行命令时的**当前工作目录**（`hpcsh login` 与 `hpcsh server` 必须在同一共享路径下工作，双方应用相同的默认或显式设置 `HPCSH_ROOT`）。
 
 | 命令 | 说明 |
 |------|------|
-| `hpcsh ls` | 列出 `$HPCSH_ROOT` 下各**节点目录**名（一般与计算节点名一致） |
+| `hpcsh ls` | 列出共享根下各**节点目录**名（一般与计算节点名一致） |
 | `hpcsh sessions <node>` | 列出该节点下已有**会话**，表头为 SESSION_ID / STATE / USER / CREATED，便于复制 id 重连 |
 | `hpcsh server --node <node>` | 在**计算节点**上常驻监听，处理 `session_*` 目录（需 Linux，`pty`） |
 | `hpcsh login <node>` | 在**登录节点**上连接该节点，进入交互 shell |
@@ -22,7 +22,7 @@
 ## 环境与安装
 
 - Python **3.9+**
-- **`HPCSH_ROOT`**：双方指向同一共享路径，例如 `export HPCSH_ROOT=/share/hpc_remote`
+- **`HPCSH_ROOT`**（可选）：显式指定共享根；不设则使用**启动命令时的当前目录**。跨机场景建议在双方 `export HPCSH_ROOT=/share/hpc_remote`，避免依赖各自 cwd。
 
 **推荐：pip 安装（会安装 `hpcsh` 到当前环境的 scripts 目录）**
 
@@ -38,35 +38,35 @@ hpcsh -h
 **不安装包时**，在项目目录中可直接调用 CLI 模块：
 
 ```bash
-export HPCSH_ROOT=/share/hpc_remote
+cd /share/hpc_remote   # 或先 export HPCSH_ROOT=...
 python3 hpcsh_cli.py -h
 python3 hpcsh_cli.py ls
 python3 hpcsh_cli.py login node01
 ```
 
-（也可直接运行 `hpcsh_client.py` / `hpcsh_server.py` 并传 `--node`，同样依赖已设置的 `HPCSH_ROOT`。）
+（也可直接运行 `hpcsh_client.py` / `hpcsh_server.py` 并传 `--node`；未设置 `HPCSH_ROOT` 时与 CLI 相同，默认 cwd。）
 
 ## 典型使用流程
 
-**1. 计算节点**启动服务端（每个需跑 shell 的节点各启一个，`<node>` 与目录名一致）：
+**1. 计算节点**启动服务端（每个需跑 shell 的节点各启一个，`<node>` 与目录名一致）。在共享根对应目录下执行，或设置 `HPCSH_ROOT`：
 
 ```bash
-export HPCSH_ROOT=/share/hpc_remote
-hpcsh server --node node01
+cd /share/hpc_remote && hpcsh server --node node01
+# 或：export HPCSH_ROOT=/share/hpc_remote && hpcsh server --node node01
 ```
 
-服务端监听：`$HPCSH_ROOT/node01/session_*`。
+服务端监听：`<共享根>/node01/session_*`。
 
-**2. 登录节点**连接并操作：
+**2. 登录节点**连接并操作（与上一步使用**同一共享根**：同样 `cd` 到该目录或设置相同的 `HPCSH_ROOT`）：
 
 ```bash
-export HPCSH_ROOT=/share/hpc_remote
-hpcsh login node01
+cd /share/hpc_remote && hpcsh login node01
 ```
 
 **3. 查看节点与会话（重连）**
 
 ```bash
+cd /share/hpc_remote   # 与 login/server 一致
 hpcsh ls
 hpcsh sessions node01
 hpcsh login node01 --session <SESSION_ID>

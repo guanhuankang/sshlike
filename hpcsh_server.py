@@ -6,6 +6,7 @@ import fcntl
 import os
 import pty
 import select
+import shutil
 import signal
 import struct
 import termios
@@ -22,6 +23,8 @@ from protocol import (
     OUT_LOG_FILE,
     PID_FILE,
     PROTOCOL_VERSION,
+    SERVER_SCAN_INTERVAL,
+    SERVER_SESSION_POLL_INTERVAL,
     STATE_FILE,
     append_ndjson,
     atomic_write_json,
@@ -36,7 +39,6 @@ from protocol import (
 )
 
 
-POLL_INTERVAL = 0.05
 HEARTBEAT_INTERVAL = 2.0
 
 
@@ -189,7 +191,7 @@ class SessionRunner(threading.Thread):
                     self._write_state("exit", {"exit_code": exit_code})
                     self._append_event("info", "shell exited", {"code": exit_code})
                     return
-                time.sleep(POLL_INTERVAL)
+                time.sleep(SERVER_SESSION_POLL_INTERVAL)
             if self.child_pid > 0:
                 os.kill(self.child_pid, signal.SIGTERM)
             self._append_out("exit", extra={"code": 0, "reason": "closed"})
@@ -227,38 +229,74 @@ def try_acquire_lock(session_dir: Path) -> bool:
     return True
 
 
-def serve(node_dir: Path) -> None:
+def serve(node_dir: Path, *, purge_on_exit: bool = True) -> None:
     node_dir.mkdir(parents=True, exist_ok=True)
     runners: Dict[str, SessionRunner] = {}
+    shutdown = threading.Event()
+
+    def on_signal(_sig, _frame):
+        shutdown.set()
+
+    signal.signal(signal.SIGINT, on_signal)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, on_signal)
+
     print(f"[hpcsh-server] watching: {node_dir}")
-    while True:
-        for session_dir in list_session_dirs(node_dir):
-            key = str(session_dir)
-            runner = runners.get(key)
-            if runner and runner.is_alive():
-                continue
-            state = read_json(session_dir / STATE_FILE, default={})
-            if state.get("state") == "exit":
-                continue
-            ensure_session_layout(session_dir)
-            if not try_acquire_lock(session_dir):
-                continue
-            new_runner = SessionRunner(session_dir)
-            new_runner.start()
-            runners[key] = new_runner
-        time.sleep(0.2)
+    try:
+        while not shutdown.is_set():
+            for session_dir in list_session_dirs(node_dir):
+                if shutdown.is_set():
+                    break
+                key = str(session_dir)
+                runner = runners.get(key)
+                if runner and runner.is_alive():
+                    continue
+                state = read_json(session_dir / STATE_FILE, default={})
+                if state.get("state") == "exit":
+                    continue
+                ensure_session_layout(session_dir)
+                if not try_acquire_lock(session_dir):
+                    continue
+                new_runner = SessionRunner(session_dir)
+                new_runner.start()
+                runners[key] = new_runner
+            if shutdown.wait(timeout=SERVER_SCAN_INTERVAL):
+                break
+    finally:
+        for runner in runners.values():
+            if runner.is_alive():
+                runner.stop_event.set()
+        for runner in runners.values():
+            runner.join(timeout=15.0)
+
+        if purge_on_exit:
+            removed = 0
+            for session_path in list_session_dirs(node_dir):
+                try:
+                    shutil.rmtree(session_path)
+                    removed += 1
+                except OSError:
+                    pass
+            if removed:
+                print(f"[hpcsh-server] removed {removed} session dir(s) under {node_dir}")
+        print("[hpcsh-server] stopped.")
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Shared-disk offline HPC terminal server")
     parser.add_argument("--node", required=True, help="Node name, e.g. node01")
+    parser.add_argument(
+        "--keep-sessions-on-exit",
+        action="store_true",
+        help="Do not delete session_* directories when the server exits (default: delete them)",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
     node_dir = shared_root_from_env() / args.node
-    serve(node_dir)
+    serve(node_dir, purge_on_exit=not args.keep_sessions_on_exit)
 
 
 if __name__ == "__main__":
